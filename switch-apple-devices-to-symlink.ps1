@@ -1,5 +1,5 @@
-# --- Ensure the script is running as Administrator ---
-If (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+# --- Ensure the script is running as Administrator --- 
+If (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
     Write-Warning "This script must be run as Administrator."
     Pause
     Exit
@@ -44,60 +44,68 @@ If (-not (Test-Path $NewBackupPath)) {
     Exit
 }
 
-# --- Check if old backup folder exists and if it's empty ---
-$NeedDelete = $false
+# --- Check if old backup is a correct symlink ---
+$symlinkOk = $false
 
-If (Test-Path $OldBackupPath) {
-    $content = Get-ChildItem $OldBackupPath -Force -ErrorAction SilentlyContinue
-    If ($content) {
-        $NeedDelete = $true
+if (Test-Path $OldBackupPath) {
+    $attributes = Get-Item $OldBackupPath -ErrorAction SilentlyContinue
+
+    if ($attributes.Attributes -match "ReparsePoint") {
+        # It's a junction or symlink
+        $linkTarget = (Get-Item $OldBackupPath -ErrorAction SilentlyContinue).Target
+
+        if ($linkTarget -eq $NewBackupPath) {
+            Write-Host "Existing symbolic link is already correct." -ForegroundColor Green
+            $symlinkOk = $true
+        }
+        else {
+            Write-Warning "Existing symbolic link points to a wrong location. It will be removed."
+            Remove-Item $OldBackupPath -Force
+        }
+    }
+    else {
+        # Regular folder
+        $content = Get-ChildItem $OldBackupPath -Force -ErrorAction SilentlyContinue
+        if ($content) {
+            $confirmation = Read-Host "Old Backup folder is NOT empty. Delete and create symlink? (Y/N)"
+            if ($confirmation -ne 'Y' -and $confirmation -ne 'y') {
+                Write-Host "Operation cancelled."
+                Pause
+                Exit
+            }
+        }
+        Write-Host "Deleting old Backup folder..."
+        Remove-Item $OldBackupPath -Recurse -Force
     }
 }
 
-# --- If needed, ask for confirmation ---
-If ($NeedDelete) {
-    $confirmation = Read-Host "Old Backup folder is NOT empty. Delete and create symlink? (Y/N)"
-    If ($confirmation -ne 'Y' -and $confirmation -ne 'y') {
-        Write-Host "Operation cancelled."
+# --- Create the symlink if needed ---
+if (-not $symlinkOk) {
+    Write-Host "Creating symbolic link..."
+    try {
+        New-Item -ItemType Junction -Path $OldBackupPath -Target $NewBackupPath -ErrorAction Stop | Out-Null
+        Write-Host "`nSymbolic link created successfully!" -ForegroundColor Green
+    }
+    catch {
+        Write-Error "Failed to create symbolic link. $_"
         Pause
         Exit
     }
-
-    Write-Host "Deleting old Backup folder..."
-    Remove-Item $OldBackupPath -Recurse -Force
-}
-ElseIf (Test-Path $OldBackupPath) {
-    Write-Host "Old Backup folder is empty. Removing silently..."
-    Remove-Item $OldBackupPath -Recurse -Force
-}
-
-# --- Ask user confirmation ---
-Write-Host ""
-$createLink = Read-Host "Do you want to create the symbolic link now? (This helps avoid useless indexing) (Y/N)"
-
-if ($createLink -ne 'Y' -and $createLink -ne 'y') {
-    Write-Host "Operation cancelled."
-    Pause
-    exit
-}
-
-# --- Create symbolic link ---
-Write-Host "Creating symbolic link..."
-try {
-    New-Item -ItemType Junction -Path $OldBackupPath -Target $NewBackupPath -ErrorAction Stop | Out-Null
-    Write-Host "`nSymbolic link created successfully!" -ForegroundColor Green
-}
-catch {
-    Write-Error "Failed to create symbolic link. $_"
-    Pause
-    exit
 }
 
 # --- Now that the path exists, add exclusions ---
 Write-Host "`nAdding Windows Search exclusions..."
-. .\Add-SearchExclusion.ps1
-Add-PathToWindowsSearchExclusions -Path $OldBackupPath
-Add-PathToWindowsSearchExclusions -Path $NewBackupPath
+try {
+    . .\Add-SearchExclusion.ps1
+    Add-PathToWindowsSearchExclusions -Paths @($OldBackupPath, $NewBackupPath)
+}
+catch {
+    Write-Warning "Automatic exclusion failed. Opening Windows Search settings manually..."
+    Start-Process "rundll32.exe" "shell32.dll,Control_RunDLL srchadmin.dll"
+    Write-Host "`nPlease manually add the following paths to Windows Search exclusions:" -ForegroundColor Yellow
+    Write-Host "- $OldBackupPath"
+    Write-Host "- $NewBackupPath"
+}
 
 Write-Host "`nAll operations completed successfully!" -ForegroundColor Cyan
 
